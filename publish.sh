@@ -62,15 +62,16 @@ else
   git remote add origin "$REMOTE_URL"
 fi
 
-# ── 8. Stage, commit, push ────────────────────────────────────────────────────
+# ── 8. Stage and commit (if anything changed) ────────────────────────────────
 git add -A
 
 if git diff --cached --quiet; then
-  echo "Nothing to commit — working tree clean."
-  exit 0
+  echo "Nothing new to commit."
+else
+  git commit -m "$COUNT"
 fi
 
-git commit -m "$COUNT"
+# ── 9. Push (always — recovers from a previously failed push) ─────────────────
 git push -u origin main
 
 echo ""
