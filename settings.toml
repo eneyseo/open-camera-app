@@ -1,0 +1,8 @@
+[project]
+main_keyword      = "Open Camera App"   # e.g. "lucidchart full version free download"
+app_name          = "Open Camera"   # e.g. "LucidChart"
+short_description = "Open Camera App is a feature-rich, open-source photography application for Android devices, enhancing camera functionality."   # e.g. "Professional diagramming tool for flowcharts and mind maps"
+meta_description  = "Explore the Open Camera App documentation site for a comprehensive download guide, features overview, and FAQ to enhance your photography experience."   # 150-300 chars — shown in Google search results
+release_date      = "2026-04-08"   # e.g. "2026-04-07"
+
+additional_pages = ["open camera laptop", "open camera app windows", "open camera hp laptop", "open camera macbook", "open camera app android"]
