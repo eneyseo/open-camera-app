@@ -1,19 +1,24 @@
 """
 Reads settings.toml and:
   1. Auto-fills release_date with today if empty
-  2. Replaces <<<PLACEHOLDER>>> values in base docs and mkdocs.yml
-  3. Creates stub .md files for each keyword in additional_pages
-  4. Adds additional pages to mkdocs.yml nav (<<<ADDITIONAL_NAV>>>)
-  5. Adds additional page links to index.md nav table (<<<ADDITIONAL_NAV_TABLE>>>)
-  6. Reports remaining unfilled placeholders
+  2. Picks a random unused Bing account from bing-accs.txt
+  3. Creates overrides/main.html with Bing meta tag
+  4. Creates docs/BingSiteAuth.xml
+  5. Replaces <<<PLACEHOLDER>>> values in base docs and mkdocs.yml
+  6. Creates stub .md files for each keyword in additional_pages
+  7. Adds additional pages to mkdocs.yml nav (<<<ADDITIONAL_NAV>>>)
+  8. Adds additional page links to index.md nav table (<<<ADDITIONAL_NAV_TABLE>>>)
+  9. Appends entry to publish-log.txt
+ 10. Reports remaining unfilled placeholders
 
 Run once after copying the template: python setup.py
-Re-running is safe — existing stubs are not overwritten.
+Re-running is safe — existing stubs and Bing assignment are not overwritten.
 """
 
 import sys
 import os
 import re
+import random
 from datetime import date
 from pathlib import Path
 
@@ -23,15 +28,21 @@ if sys.version_info < (3, 11):
 import tomllib
 
 
+# ── Paths ─────────────────────────────────────────────────────────────────────
+
+PROJECT_DIR  = Path(__file__).parent
+READTHEDOCS_ROOT = (PROJECT_DIR / "../../..").resolve()
+BING_ACCS_FILE   = READTHEDOCS_ROOT / "bing-accs.txt"
+LOG_FILE         = READTHEDOCS_ROOT / "publish-log.txt"
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def slug(keyword: str) -> str:
-    """'open camera laptop' → 'open-camera-laptop'"""
     return re.sub(r"\s+", "-", keyword.strip().lower())
 
 
 def nav_title(keyword: str) -> str:
-    """'open camera laptop' → 'Open Camera Laptop'"""
     return keyword.strip().title()
 
 
@@ -43,7 +54,6 @@ def load_settings(path: Path) -> dict:
 
 
 def autofill_release_date(settings_path: Path, p: dict) -> str:
-    """Write today's date into settings.toml if release_date is empty. Returns the date."""
     release_date = p.get("release_date", "").strip()
     if not release_date:
         release_date = date.today().isoformat()
@@ -54,7 +64,7 @@ def autofill_release_date(settings_path: Path, p: dict) -> str:
     return release_date
 
 
-def build_replacements(p: dict, release_date: str) -> dict:
+def build_replacements(p: dict, release_date: str, bing_code: str) -> dict:
     repo_name = Path(os.getcwd()).name
     return {
         "<<<APP_NAME>>>":                       p["app_name"],
@@ -64,11 +74,62 @@ def build_replacements(p: dict, release_date: str) -> dict:
         "<<<RELEASE_DATE>>>":                   release_date,
         "<<<REPO_NAME>>>":                      repo_name,
         "<<<RTFD_SLUG>>>":                      repo_name,
+        "<<<BING_VALIDATION_CODE>>>":           bing_code,
     }
 
 
 def validate(replacements: dict) -> list[str]:
-    return [k for k, v in replacements.items() if not v.strip()]
+    skip = {"<<<BING_VALIDATION_CODE>>>"}
+    return [k for k, v in replacements.items() if k not in skip and not v.strip()]
+
+
+# ── Bing accounts ─────────────────────────────────────────────────────────────
+
+def load_bing_accounts(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    accounts = []
+    for line in path.read_text(encoding="utf-8").strip().splitlines()[1:]:  # skip header
+        parts = line.strip().split(";")
+        if len(parts) >= 2:
+            accounts.append({
+                "email":           parts[0],
+                "validation_code": parts[1],
+                "api_key":         parts[2] if len(parts) > 2 else "",
+            })
+    return accounts
+
+
+def load_used_bing_emails(log_path: Path) -> set[str]:
+    if not log_path.exists():
+        return set()
+    used = set()
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        parts = line.split(";")
+        if len(parts) >= 6:
+            used.add(parts[5].strip())  # bing_email is field index 5
+    return used
+
+
+def pick_bing_account(path: Path) -> dict | None:
+    accounts = load_bing_accounts(path)
+    if not accounts:
+        return None
+    used = load_used_bing_emails(LOG_FILE)
+    available = [a for a in accounts if a["email"] not in used]
+    if not available:
+        print("WARNING: all Bing accounts already used. Picking a random one anyway.")
+        return random.choice(accounts)
+    return random.choice(available)
+
+
+def load_project_bing_code(project_dir: Path) -> str | None:
+    """Return Bing code already assigned to this project (from overrides/main.html)."""
+    html = project_dir / "overrides" / "main.html"
+    if not html.exists():
+        return None
+    m = re.search(r'msvalidate\.01["\s]+content="([^"]+)"', html.read_text(encoding="utf-8"))
+    return m.group(1) if m else None
 
 
 # ── File operations ───────────────────────────────────────────────────────────
@@ -87,15 +148,11 @@ def replace_in_file(path: Path, replacements: dict) -> bool:
 # ── Additional pages ──────────────────────────────────────────────────────────
 
 def make_stub(keyword: str, app_name: str, main_keyword: str, all_keywords: list[str]) -> str:
-    """Generate a stub .md for an additional_pages keyword."""
     title = nav_title(keyword)
-
     other_rows = "\n".join(
         f"| [{nav_title(kw)}]({slug(kw)}.md) | {app_name} on {nav_title(kw).split()[-1]} |"
-        for kw in all_keywords
-        if kw != keyword
+        for kw in all_keywords if kw != keyword
     )
-
     return f"""---
 description: <!-- 150-300 chars about {title} for {app_name} — fill with LLM -->
 ---
@@ -135,10 +192,7 @@ def create_additional_pages(docs_dir: Path, additional_pages: list[str],
     for kw in additional_pages:
         page_path = docs_dir / f"{slug(kw)}.md"
         if not page_path.exists():
-            page_path.write_text(
-                make_stub(kw, app_name, main_keyword, additional_pages),
-                encoding="utf-8"
-            )
+            page_path.write_text(make_stub(kw, app_name, main_keyword, additional_pages), encoding="utf-8")
             created.append(page_path.name)
     return created
 
@@ -146,20 +200,15 @@ def create_additional_pages(docs_dir: Path, additional_pages: list[str],
 # ── Nav injection ─────────────────────────────────────────────────────────────
 
 def inject_nav(mkdocs_path: Path, additional_pages: list[str]) -> bool:
-    """Replace <<<ADDITIONAL_NAV>>> in mkdocs.yml with generated nav lines."""
     text = mkdocs_path.read_text(encoding="utf-8")
     if "<<<ADDITIONAL_NAV>>>" not in text:
         return False
-    nav_lines = "\n".join(
-        f"  - {nav_title(kw)}: {slug(kw)}.md"
-        for kw in additional_pages
-    )
+    nav_lines = "\n".join(f"  - {nav_title(kw)}: {slug(kw)}.md" for kw in additional_pages)
     mkdocs_path.write_text(text.replace("<<<ADDITIONAL_NAV>>>", nav_lines), encoding="utf-8")
     return True
 
 
 def inject_nav_table(index_path: Path, additional_pages: list[str]) -> bool:
-    """Replace <<<ADDITIONAL_NAV_TABLE>>> in index.md with table rows."""
     text = index_path.read_text(encoding="utf-8")
     if "<<<ADDITIONAL_NAV_TABLE>>>" not in text:
         return False
@@ -171,10 +220,39 @@ def inject_nav_table(index_path: Path, additional_pages: list[str]) -> bool:
     return True
 
 
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+def append_log(p: dict, release_date: str, repo_name: str,
+               github_email: str, bing: dict) -> None:
+    entry = ";".join([
+        release_date,
+        p["app_name"],
+        p["main_keyword"],
+        repo_name,
+        github_email,
+        bing["email"],
+        bing["validation_code"],
+    ])
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(entry + "\n")
+    print(f"Logged → {LOG_FILE.name}")
+
+
+def load_github_email(project_dir: Path) -> str:
+    creds = project_dir / "../.gh-credentials"
+    if creds.exists():
+        for line in creds.read_text().splitlines():
+            if line.startswith("GITHUB_EMAIL="):
+                return line.split("=", 1)[1].strip()
+    return ""
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 BASE_FILES = [
     "mkdocs.yml",
+    "overrides/main.html",
+    "docs/BingSiteAuth.xml",
     "docs/index.md",
     "docs/features.md",
     "docs/how-to-download.md",
@@ -191,14 +269,48 @@ def main():
 
     settings = load_settings(settings_path)
     p = settings["project"]
-    # additional_pages can be under [project] or at top level
     additional_pages = p.get("additional_pages") or settings.get("additional_pages", [])
 
     # 1. Auto-fill release_date
     release_date = autofill_release_date(settings_path, p)
 
-    # 2. Build replacements and validate
-    replacements = build_replacements(p, release_date)
+    # 2. Assign Bing account (skip if already assigned)
+    existing_code = load_project_bing_code(root)
+    if existing_code and "<<<" not in existing_code:
+        bing = {"email": "already assigned", "validation_code": existing_code, "api_key": ""}
+        print(f"Bing account already assigned: {existing_code[:8]}...")
+    else:
+        bing = pick_bing_account(BING_ACCS_FILE)
+        if not bing:
+            print("WARNING: bing-accs.txt not found or empty — skipping Bing verification.")
+            bing = {"email": "", "validation_code": "", "api_key": ""}
+        else:
+            print(f"Assigned Bing account: {bing['email']}")
+
+    # 3. Ensure overrides/ dir exists and create main.html if missing
+    overrides_dir = root / "overrides"
+    overrides_dir.mkdir(exist_ok=True)
+    main_html = overrides_dir / "main.html"
+    if not main_html.exists():
+        main_html.write_text(
+            '{% extends "base.html" %}\n\n'
+            '{% block extrahead %}\n'
+            '{{ super() }}\n'
+            '<meta name="msvalidate.01" content="<<<BING_VALIDATION_CODE>>>">\n'
+            '{% endblock %}\n',
+            encoding="utf-8"
+        )
+
+    # 4. Ensure docs/BingSiteAuth.xml exists
+    xml_path = root / "docs" / "BingSiteAuth.xml"
+    if not xml_path.exists():
+        xml_path.write_text(
+            '<?xml version="1.0"?>\n<users>\n  <user><<<BING_VALIDATION_CODE>>></user>\n</users>\n',
+            encoding="utf-8"
+        )
+
+    # 5. Build replacements and validate
+    replacements = build_replacements(p, release_date, bing["validation_code"])
     empty = validate(replacements)
     if empty:
         print("WARNING: empty fields in settings.toml:")
@@ -206,7 +318,7 @@ def main():
             print(f"  {k}")
         print()
 
-    # 3. Create additional page stubs
+    # 6. Create additional page stubs
     docs_dir = root / "docs"
     if additional_pages:
         created = create_additional_pages(docs_dir, additional_pages, p["app_name"], p["main_keyword"])
@@ -215,15 +327,15 @@ def main():
             for f in created:
                 print(f"  docs/{f}")
 
-    # 4. Inject nav entries into mkdocs.yml
+    # 7. Inject nav into mkdocs.yml
     if additional_pages and inject_nav(root / "mkdocs.yml", additional_pages):
         print("Updated mkdocs.yml nav.")
 
-    # 5. Inject nav table rows into index.md
+    # 8. Inject nav table into index.md
     if additional_pages and inject_nav_table(docs_dir / "index.md", additional_pages):
         print("Updated index.md Quick Navigation table.")
 
-    # 6. Replace placeholders in all files
+    # 9. Replace placeholders in all files
     target_files = BASE_FILES + [f"docs/{slug(kw)}.md" for kw in additional_pages]
     changed = []
     for rel in target_files:
@@ -241,8 +353,14 @@ def main():
     else:
         print("Nothing to replace — all placeholders already filled.")
 
-    # 7. Report remaining unfilled placeholders
-    all_files = list(docs_dir.glob("*.md")) + [root / "mkdocs.yml"]
+    # 10. Write log entry (only if Bing was freshly assigned)
+    repo_name = root.name
+    github_email = load_github_email(root)
+    if bing["email"] and bing["email"] != "already assigned":
+        append_log(p, release_date, repo_name, github_email, bing)
+
+    # 11. Check for remaining placeholders
+    all_files = list(docs_dir.glob("*.md")) + [root / "mkdocs.yml", root / "overrides/main.html"]
     remaining = []
     for path in all_files:
         if path.exists():
